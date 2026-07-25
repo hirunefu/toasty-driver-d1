@@ -139,7 +139,11 @@ impl Driver for D1 {
         static CAPABILITY: std::sync::OnceLock<Capability> = std::sync::OnceLock::new();
         CAPABILITY.get_or_init(|| Capability {
             driver_name: "D1",
+            // The HTTP API cannot open a transaction, so a read-only plan has
+            // to run without the snapshot one would otherwise give it, and a
+            // set of writes has to arrive together to commit together.
             snapshot_reads: false,
+            atomic_write_batch: true,
             ..Capability::SQLITE
         })
     }
@@ -194,6 +198,92 @@ pub struct Connection {
     client: D1Client,
 }
 
+/// Turns one statement's rows into the response shape the plan expects.
+fn rows_to_response(outcome: crate::http::RawOutcome, ret: SqlReturn) -> Result<ExecResponse> {
+    match ret {
+        SqlReturn::Count => Ok(ExecResponse::count(outcome.changes)),
+        SqlReturn::Infer => {
+            let values = outcome
+                .rows
+                .iter()
+                .map(|row| {
+                    stmt::ValueRecord::from_vec(
+                        row.iter().map(value::json_to_value_infer).collect(),
+                    )
+                    .into()
+                })
+                .collect();
+            Ok(ExecResponse::value_stream(stmt::ValueStream::from_vec(
+                values,
+            )))
+        }
+        SqlReturn::Types(ret_tys) => {
+            let mut values = vec![];
+            for row in &outcome.rows {
+                let items = ret_tys
+                    .iter()
+                    .enumerate()
+                    .map(|(index, ty)| {
+                        let cell = row.get(index).unwrap_or(&serde_json::Value::Null);
+                        value::json_to_value(cell, ty)
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(toasty_core::Error::driver_operation_failed)?;
+                values.push(stmt::ValueRecord::from_vec(items).into());
+            }
+            Ok(ExecResponse::value_stream(stmt::ValueStream::from_vec(
+                values,
+            )))
+        }
+    }
+}
+
+/// Substitutes `?N` placeholders with literals so several statements can share
+/// one request, which is how D1 is given a set of writes to commit together.
+fn inline_params(sql: &str, params: &[serde_json::Value]) -> String {
+    let mut out = String::with_capacity(sql.len());
+    let mut chars = sql.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if c != '?' {
+            out.push(c);
+            continue;
+        }
+
+        let mut digits = String::new();
+        while let Some(d) = chars.peek().copied().filter(char::is_ascii_digit) {
+            digits.push(d);
+            chars.next();
+        }
+
+        match digits.parse::<usize>().ok().and_then(|n| params.get(n - 1)) {
+            Some(value) => out.push_str(&sql_literal(value)),
+            None => out.push_str("NULL"),
+        }
+    }
+
+    out
+}
+
+fn sql_literal(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => "NULL".to_string(),
+        serde_json::Value::Bool(b) => (if *b { "1" } else { "0" }).to_string(),
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::String(s) => format!("'{}'", s.replace('\'', "''")),
+        // A blob literal; D1 returns these as arrays of byte values too.
+        serde_json::Value::Array(items) => {
+            let hex: String = items
+                .iter()
+                .filter_map(serde_json::Value::as_u64)
+                .map(|b| format!("{b:02x}"))
+                .collect();
+            format!("X'{hex}'")
+        }
+        other => format!("'{}'", other.to_string().replace('\'', "''")),
+    }
+}
+
 fn into_core_error(err: HttpError) -> toasty_core::Error {
     match err {
         // A transport-level failure must classify as connection_lost so the
@@ -222,42 +312,7 @@ impl Connection {
             .await
             .map_err(into_core_error)?;
 
-        match ret {
-            SqlReturn::Count => Ok(ExecResponse::count(outcome.changes)),
-            SqlReturn::Infer => {
-                let values = outcome
-                    .rows
-                    .iter()
-                    .map(|row| {
-                        stmt::ValueRecord::from_vec(
-                            row.iter().map(value::json_to_value_infer).collect(),
-                        )
-                        .into()
-                    })
-                    .collect();
-                Ok(ExecResponse::value_stream(stmt::ValueStream::from_vec(
-                    values,
-                )))
-            }
-            SqlReturn::Types(ret_tys) => {
-                let mut values = vec![];
-                for row in &outcome.rows {
-                    let items = ret_tys
-                        .iter()
-                        .enumerate()
-                        .map(|(index, ty)| {
-                            let cell = row.get(index).unwrap_or(&serde_json::Value::Null);
-                            value::json_to_value(cell, ty)
-                        })
-                        .collect::<Result<Vec<_>, _>>()
-                        .map_err(toasty_core::Error::driver_operation_failed)?;
-                    values.push(stmt::ValueRecord::from_vec(items).into());
-                }
-                Ok(ExecResponse::value_stream(stmt::ValueStream::from_vec(
-                    values,
-                )))
-            }
-        }
+        rows_to_response(outcome, ret)
     }
 }
 
@@ -323,6 +378,72 @@ impl toasty_core::driver::Connection for Connection {
 
         let sql_str = sql::Serializer::sqlite(&schema.db).serialize(&sql);
         self.exec_sql(&sql_str, typed_params, ret).await
+    }
+
+    async fn exec_batch(
+        &mut self,
+        schema: &Arc<Schema>,
+        ops: Vec<Operation>,
+    ) -> Result<Vec<ExecResponse>> {
+        let mut sql = String::new();
+        let mut returns = Vec::with_capacity(ops.len());
+
+        for op in ops {
+            let Operation::QuerySql(op) = op else {
+                return Err(toasty_core::Error::unsupported_feature(
+                    "the D1 driver batches SQL statements only",
+                ));
+            };
+
+            let statement = sql::Statement::from(op.stmt);
+            let ret = match &statement {
+                sql::Statement::Insert(stmt) if stmt.returning.is_some() => {
+                    SqlReturn::Types(op.ret.clone().expect("RETURNING declares its columns"))
+                }
+                sql::Statement::Update(stmt) if stmt.returning.is_some() => {
+                    SqlReturn::Types(op.ret.clone().expect("RETURNING declares its columns"))
+                }
+                sql::Statement::Delete(stmt) if stmt.returning.is_some() => {
+                    SqlReturn::Types(op.ret.clone().expect("RETURNING declares its columns"))
+                }
+                _ => SqlReturn::Count,
+            };
+
+            let text = sql::Serializer::sqlite(&schema.db).serialize(&statement);
+            let params = op
+                .params
+                .iter()
+                .map(|tv| value::param_to_json(&tv.value))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(toasty_core::Error::driver_operation_failed)?;
+
+            // The serializer already terminates each statement; a second
+            // semicolon would leave an empty one, which D1 rejects.
+            let text = inline_params(&text, &params);
+            sql.push_str(text.trim_end());
+            if !text.trim_end().ends_with(';') {
+                sql.push(';');
+            }
+            returns.push(ret);
+        }
+
+        let outcomes = self.client.raw_batch(&sql).await.map_err(into_core_error)?;
+
+        if outcomes.len() != returns.len() {
+            return Err(toasty_core::Error::driver_operation_failed(D1Error::new(
+                format!(
+                    "D1 returned {} results for {} statements",
+                    outcomes.len(),
+                    returns.len()
+                ),
+            )));
+        }
+
+        outcomes
+            .into_iter()
+            .zip(returns)
+            .map(|(outcome, ret)| rows_to_response(outcome, ret))
+            .collect()
     }
 
     async fn push_schema(&mut self, schema: &Schema) -> Result<()> {

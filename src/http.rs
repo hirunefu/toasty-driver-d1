@@ -122,6 +122,48 @@ impl D1Client {
     }
 }
 
+impl D1Client {
+    /// Runs several statements in one request, which D1 applies atomically:
+    /// a failure anywhere rolls back the whole request.
+    ///
+    /// The statements arrive already inlined, because `?N` placeholders are
+    /// numbered per statement while a request carries one `params` array.
+    pub(crate) async fn raw_batch(&self, sql: &str) -> Result<Vec<RawOutcome>, HttpError> {
+        let response = self
+            .http
+            .post(&self.endpoint)
+            .bearer_auth(&self.token)
+            .json(&serde_json::json!({ "sql": sql, "params": [] }))
+            .send()
+            .await
+            .map_err(HttpError::Transport)?;
+
+        let status = response.status();
+        let envelope: Envelope = response.json().await.map_err(HttpError::Transport)?;
+
+        if !envelope.success {
+            let detail = envelope
+                .errors
+                .iter()
+                .map(|e| format!("{}: {}", e.code, e.message))
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(HttpError::Api(D1Error::new(format!(
+                "D1 write batch failed (HTTP {status}): {detail}"
+            ))));
+        }
+
+        Ok(envelope
+            .result
+            .into_iter()
+            .map(|statement| RawOutcome {
+                rows: statement.results.map(|r| r.rows).unwrap_or_default(),
+                changes: statement.meta.map(|m| m.changes).unwrap_or_default(),
+            })
+            .collect())
+    }
+}
+
 impl std::fmt::Debug for D1Client {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // The bearer token must never reach logs.

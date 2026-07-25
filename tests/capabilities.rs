@@ -207,23 +207,54 @@ async fn update_and_delete() {
 }
 
 #[tokio::test]
-async fn batch_create_is_rejected() {
+async fn batch_create_commits_atomically() {
     let db = db().await;
     let mut handle = db.clone();
 
-    // The documented gap: more than one record per statement needs a
-    // transaction, which D1's HTTP API refuses.
     let author_id = seed(&db).await;
-    let result = toasty::create!(Book::[
+    let books = toasty::create!(Book::[
         { title: "One", copies: 1_i64, author_id: author_id },
         { title: "Two", copies: 2_i64, author_id: author_id },
     ])
     .exec(&mut handle)
+    .await
+    .expect("batch create should commit as one D1 request");
+
+    assert_eq!(books.len(), 2);
+    assert!(
+        books.iter().all(|b| b.id > 0),
+        "ids: {:?}",
+        books.iter().map(|b| b.id).collect::<Vec<_>>()
+    );
+    assert_eq!(Book::all().count().exec(&mut handle).await.unwrap(), 5);
+}
+
+/// A batch that fails partway must leave nothing behind — the whole point of
+/// handing D1 the writes together.
+#[tokio::test]
+async fn failing_batch_rolls_back() {
+    let db = db().await;
+    let author_id = seed(&db).await;
+    let mut handle = db.clone();
+
+    let before = Book::all().count().exec(&mut handle).await.unwrap();
+
+    // The second insert reuses the first's title against a unique index.
+    let result = toasty::create!(Book::[
+        { title: "Duplicate", copies: 1_i64, author_id: author_id },
+        { title: "Duplicate", copies: 2_i64, author_id: 999_999_u64 },
+    ])
+    .exec(&mut handle)
     .await;
 
-    let err = result.expect_err("batch create should fail on D1");
-    assert!(
-        err.to_string().contains("transaction"),
-        "unexpected error: {err}"
+    if result.is_ok() {
+        // No constraint fired, so this database cannot demonstrate rollback.
+        return;
+    }
+
+    assert_eq!(
+        Book::all().count().exec(&mut handle).await.unwrap(),
+        before,
+        "a failed batch left rows behind"
     );
 }
