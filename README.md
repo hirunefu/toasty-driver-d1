@@ -15,7 +15,9 @@ the driver runs anywhere `reqwest` runs — no Workers runtime, no D1 binding.
 ## What this driver cannot do
 
 Five things fail, every time, by design. Each was measured against a live
-database — none is a "not yet implemented".
+database — none is a "not yet implemented". For why, what D1 can do instead,
+how other ORMs handle the same wall, and the designs that were tried and
+rejected, see **[docs/limitations.md](docs/limitations.md)**.
 
 **1. Explicit transactions.** D1 rejects `BEGIN`, `COMMIT`, and `SAVEPOINT`
 as SQL, so `db.transaction()` cannot be honoured.
@@ -46,8 +48,9 @@ Author::filter_by_id(id).include(Author::fields().books()).get(&mut db).await
 
 **4. Integers beyond ±2^53.** The API carries numbers as JSON, so anything
 larger is corrupted in transit — `i64::MAX` comes back as
-`9223372036854776000` and the column's storage class flips to `real`. The
-driver refuses such values rather than let that happen silently.
+`9223372036854776000` and the column's storage class flips to `real`
+([measurements](docs/limitations.md#6-integers-are-limited-to-253)). The driver
+refuses such values rather than let that happen silently.
 
 ```rust
 Item::create().big(i64::MAX).exec(&mut db).await
@@ -116,47 +119,6 @@ test:
 The short version: **anything that is one statement works; anything Toasty
 implements as several statements that must agree does not.**
 
-## Why those limits exist
-
-Failures 1–3 above all reduce to one thing: D1 refuses SQL-level transaction
-control, and says so explicitly.
-
-> To execute a transaction, please use the `state.storage.transaction()` [...]
-> APIs instead of the SQL BEGIN TRANSACTION or SAVEPOINT statements.
-
-So the driver answers `Operation::Transaction` with `unsupported_feature`, and
-everything Toasty builds on that primitive — batch creates, eager loading,
-multi-table writes, rollback — goes with it.
-
-### Why not emulate transactions?
-
-D1's HTTP API *can* run several statements atomically — send them in one
-request and a failure anywhere rolls the whole request back. That is the same
-primitive behind `db.batch()` in the Workers binding, and it is how Drizzle
-ORM supports multi-statement writes on D1. (Drizzle's `transaction()` emits
-literal `begin`/`commit`, which D1 rejects; it has been an open bug there.)
-
-Two designs were tried against that primitive and rejected:
-
-- **Buffer statements until commit, returning lazy result streams.** Toasty's
-  engine awaits each statement's rows before issuing the next, so deferring
-  results deadlocks. Measured, not assumed.
-- **Treat transaction boundaries as no-ops and write eagerly.** This makes
-  batches "work" while silently dropping atomicity — a mid-batch failure
-  leaves partial data with no error. Not worth the correctness.
-
-The clean fix belongs upstream. Toasty has a design for it —
-`Capability::transaction_delivery` with a `WriteSet` mode, where a driver
-receives an atomic group as one operation instead of a statement stream
-([docs/dev/design/atomic-batches.md](https://github.com/tokio-rs/toasty/blob/main/docs/dev/design/atomic-batches.md),
-motivated by DynamoDB). D1's HTTP API fits `WriteSet` exactly. The design is
-not implemented in Toasty 0.9, so until it lands this driver rejects
-transactions, matching what Toasty's own DynamoDB driver does.
-
-Blobs, by contrast, were a pleasant surprise: passed as JSON arrays of byte
-values, D1 stores them as real BLOBs (`typeof()` reports `blob`), so `Vec<u8>`
-and UUID keys round-trip exactly.
-
 ## Testing
 
 Unit tests cover value conversion and the HTTP layer against a mock server,
@@ -178,24 +140,19 @@ cargo test --features live-tests --test integration_suite
 The suite creates and drops tables freely, hence the separate variable — do
 not point it at a database you care about.
 
-### Suite results
+The suite reports **717 pass, 631 fail**. That count overstates the gap: most
+of its tests seed fixtures with a multi-record `create!` and so fail before
+reaching the feature under test — all six `filter_like` tests fail on D1, yet
+`LIKE` itself works. See
+[docs/limitations.md](docs/limitations.md#8-reading-the-integration-suite-results)
+for the breakdown.
 
-Against Toasty 0.9's suite (1348 generated tests): **717 pass, 631 fail**.
-Every failure traces to one of three causes:
+`tests/capabilities.rs` is the counterpart, and the source of the table above:
+one feature per test, seeded one record per statement.
 
-| Cause | Tests | Fixable |
-| --- | --- | --- |
-| Requires a transaction | 624 | No — D1 rejects `BEGIN`/`COMMIT` |
-| Integer beyond ±2^53 | 4 | No — rejected at bind time rather than corrupted |
-| Timestamp inside a `#[document]` value | 3 | Unknown — not yet investigated |
-
-**Read that failure count carefully.** Most suite tests seed their fixtures
-with a multi-record `create!`, so they fail before reaching the feature under
-test: all six `filter_like` tests fail on D1, yet `LIKE` itself works. That is
-why the capability table above comes from `tests/capabilities.rs`, which seeds
-one record per statement, rather than from these totals. The suite number
-measures how much of Toasty's surface assumes transactions — not how much of
-it D1 can do.
+```sh
+cargo test --features live-tests --test capabilities
+```
 
 ## License
 
