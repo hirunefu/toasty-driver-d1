@@ -11,9 +11,10 @@
 //!   local-SQLite latency.
 //! - The HTTP API has no interactive transactions: `Operation::Transaction`
 //!   is rejected, and migrations apply statement-by-statement without a
-//!   wrapping transaction.
-//! - Integers beyond 2^53 lose precision in JSON transit (see `value`).
-//! - `Bytes` columns are unsupported.
+//!   wrapping transaction. Anything Toasty builds on transactions — a
+//!   multi-record `create!`, an eager load — fails with it.
+//! - Integers beyond ±2^53 are rejected when binding, because D1's JSON
+//!   transport would otherwise corrupt them silently (see `value`).
 //!
 //! # Examples
 //!
