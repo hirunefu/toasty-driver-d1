@@ -9,8 +9,68 @@ round trip to `/accounts/{account}/d1/database/{database}/raw`, which means
 the driver runs anywhere `reqwest` runs — no Workers runtime, no D1 binding.
 
 > **Status: experimental.** It runs a real application against real D1, but
-> the HTTP API cannot do transactions, and that rules out a large part of
-> Toasty's feature set. Read [Limitations](#limitations) before adopting it.
+> the HTTP API offers no interactive transactions, and that rules out a large
+> part of Toasty's feature set. Read the next section before adopting it.
+
+## What this driver cannot do
+
+Five things fail, every time, by design. Each was measured against a live
+database — none is a "not yet implemented".
+
+**1. Explicit transactions.** D1 rejects `BEGIN`, `COMMIT`, and `SAVEPOINT`
+as SQL, so `db.transaction()` cannot be honoured.
+
+```rust
+db.transaction(|tx| async move { /* ... */ }).await
+// Error: unsupported feature: the D1 HTTP API does not support
+//        interactive transactions
+```
+
+**2. Multi-record `create!`.** Toasty wraps a multi-record insert in a
+transaction, so it fails for the same reason. Insert one record per statement
+instead.
+
+```rust
+toasty::create!(Book::[ { title: "One" }, { title: "Two" } ]).exec(&mut db).await
+// Error: unsupported feature: ... interactive transactions
+```
+
+**3. Relation preload (`.include()`).** Eager loading issues several
+statements under one transaction. Query each side separately — `author.books()`
+and foreign-key lookups both work, at the cost of an extra round trip.
+
+```rust
+Author::filter_by_id(id).include(Author::fields().books()).get(&mut db).await
+// Error: unsupported feature: ... interactive transactions
+```
+
+**4. Integers beyond ±2^53.** The API carries numbers as JSON, so anything
+larger is corrupted in transit — `i64::MAX` comes back as
+`9223372036854776000` and the column's storage class flips to `real`. The
+driver refuses such values rather than let that happen silently.
+
+```rust
+Item::create().big(i64::MAX).exec(&mut db).await
+// Error: integer 9223372036854775807 exceeds ±2^53, the range D1's JSON API
+//        carries without loss of precision
+```
+
+**5. `Timestamp` inside a `#[document]` value.** Serializing an embedded
+document that contains a timestamp fails. Timestamps in ordinary columns are
+fine.
+
+```
+Error: serialize document value: cannot encode Timestamp(..) as JSON
+```
+
+Two more properties are worth knowing before adopting the driver, though
+neither is an outright failure:
+
+- **A failed migration is not rolled back.** `apply_migration` runs each
+  statement in its own request, so a migration that fails midway leaves the
+  earlier statements applied. Rerun after fixing it.
+- **Every statement is an HTTPS round trip.** Suitable for low-traffic
+  applications and jobs, not hot paths.
 
 ## Usage
 
@@ -56,27 +116,17 @@ test:
 The short version: **anything that is one statement works; anything Toasty
 implements as several statements that must agree does not.**
 
-## Limitations
+## Why those limits exist
 
-These are properties of D1's HTTP API, not gaps that a future release closes.
-
-**No transactions.** D1 rejects `BEGIN`, `COMMIT`, and `SAVEPOINT` outright,
-even inside a single request:
+Failures 1–3 above all reduce to one thing: D1 refuses SQL-level transaction
+control, and says so explicitly.
 
 > To execute a transaction, please use the `state.storage.transaction()` [...]
 > APIs instead of the SQL BEGIN TRANSACTION or SAVEPOINT statements.
 
-The driver therefore answers `Operation::Transaction` with
-`unsupported_feature`. Anything Toasty implements on top of transactions —
-batch creates, multi-statement rollback, `has_many` writes that touch several
-tables — fails. Single-statement CRUD, queries, and relations that read across
-tables all work.
-
-**Integers are limited to ±2^53.** The API carries numbers as JSON, so larger
-values are corrupted in transit: `i64::MAX` comes back as
-`9223372036854776000` and the column's storage class flips from `integer` to
-`real`. Rather than let that pass silently, binding rejects out-of-range
-integers with an error naming the limit. Auto-increment ids stay far below it.
+So the driver answers `Operation::Transaction` with `unsupported_feature`, and
+everything Toasty builds on that primitive — batch creates, eager loading,
+multi-table writes, rollback — goes with it.
 
 ### Why not emulate transactions?
 
@@ -103,15 +153,9 @@ motivated by DynamoDB). D1's HTTP API fits `WriteSet` exactly. The design is
 not implemented in Toasty 0.9, so until it lands this driver rejects
 transactions, matching what Toasty's own DynamoDB driver does.
 
-**No interactive migrations.** `apply_migration` runs each statement in its
-own request, so a migration that fails midway leaves earlier statements
-applied. Rerunning after a fix is the recovery path.
-
-**Latency is HTTP latency.** Every statement is a separate HTTPS request.
-This driver suits low-traffic applications and jobs, not hot paths.
-
-Blobs, on the other hand, work: they cross as JSON arrays of byte values and
-D1 stores them as real BLOBs, so `Vec<u8>` and UUID keys round-trip.
+Blobs, by contrast, were a pleasant surprise: passed as JSON arrays of byte
+values, D1 stores them as real BLOBs (`typeof()` reports `blob`), so `Vec<u8>`
+and UUID keys round-trip exactly.
 
 ## Testing
 
