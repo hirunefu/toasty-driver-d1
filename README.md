@@ -108,7 +108,7 @@ test:
 | `order_by` + `limit`, `count()` | ✅ |
 | Relations queried per side (`author.books()`, FK lookup) | ✅ |
 | Embedded structs and enums, documents, collections | ✅ |
-| `Vec<u8>` and UUID keys (stored as real BLOBs) | ✅ |
+| `Vec<u8>` and UUID keys | ✅ |
 | Upsert, auto-increment keys, composite keys, indices | ✅ |
 | Multi-record `create!` | ❌ needs a transaction |
 | Relation preload (`.include()`) | ❌ needs a transaction |
@@ -144,7 +144,7 @@ The suite reports **717 pass, 631 fail**. That count overstates the gap: most
 of its tests seed fixtures with a multi-record `create!` and so fail before
 reaching the feature under test — all six `filter_like` tests fail on D1, yet
 `LIKE` itself works. See
-[docs/limitations.md](docs/limitations.md#8-reading-the-integration-suite-results)
+[docs/limitations.md](docs/limitations.md#7-reading-the-integration-suite-results)
 for the breakdown.
 
 `tests/capabilities.rs` is the counterpart, and the source of the table above:

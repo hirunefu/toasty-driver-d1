@@ -153,19 +153,7 @@ SQLite driver — the driver wraps `u64` into `i64` and casts the bit pattern
 back when decoding. `u64::MAX` therefore round-trips correctly as `-1`, while
 a mid-range value such as `2^60` is rejected.
 
-## 7. Blobs work
-
-The one limitation that turned out not to be one. Passing a JSON array of byte
-values binds a real BLOB, and D1 returns it in the same shape:
-
-```
-bind [1,2,3]  →  typeof() = 'blob',  hex() = '010203',  returned as [1,2,3]
-```
-
-So `Vec<u8>` columns and UUID keys round-trip exactly. Supporting this
-recovered 311 tests in the integration suite.
-
-## 8. Reading the integration suite results
+## 7. Reading the integration suite results
 
 Against Toasty 0.9's suite (1348 generated tests): **717 pass, 631 fail**.
 
