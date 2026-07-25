@@ -37,9 +37,10 @@ toasty::create!(Book::[ { title: "One" }, { title: "Two" } ]).exec(&mut db).awai
 // Error: unsupported feature: ... interactive transactions
 ```
 
-**3. Relation preload (`.include()`).** Eager loading issues several
-statements under one transaction. Query each side separately — `author.books()`
-and foreign-key lookups both work, at the cost of an extra round trip.
+**3. Relation preload (`.include()`).** Eager loading runs its reads under one
+transaction, for a consistent snapshot. Query each side separately —
+`author.books()` and foreign-key lookups both work, at the cost of an extra
+round trip and of that snapshot.
 
 ```rust
 Author::filter_by_id(id).include(Author::fields().books()).get(&mut db).await

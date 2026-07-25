@@ -115,7 +115,12 @@ guarantee it appears to provide is worse than one that refuses.
 
 ## 5. Where the fix belongs
 
-Upstream. Toasty already has a design for it:
+Upstream, in two separate pieces. They are worth separating, because a fix for
+one does not fix the other.
+
+### Multi-statement writes — needs `WriteSet`
+
+Toasty already has a design:
 [`docs/dev/design/atomic-batches.md`](https://github.com/tokio-rs/toasty/blob/main/docs/dev/design/atomic-batches.md)
 proposes `Capability::transaction_delivery` with three modes:
 
@@ -128,8 +133,36 @@ multi-statement request fits it exactly, and it sidesteps the deadlock above
 because the driver is handed every statement at once instead of being fed them
 one at a time.
 
-The design is not implemented in Toasty 0.9, nor on upstream `main` — only the
-document exists. Until it lands, this driver rejects transactions.
+It is not implemented. `transaction_delivery`, `WriteSet`, and `TransactWrite`
+appear nowhere in the source of `toasty-core` 0.9.0 or of upstream `main` —
+`Operation` on `main` still has exactly the variants this driver already
+handles. The only merged pull request on the subject is
+*"docs: add atomic-batches design doc and roadmap entry"*: the document landed,
+the implementation did not.
+
+### Relation preload — a different gap
+
+Eager loading does **not** need `WriteSet`, because it performs no writes. The
+engine wraps the reads themselves:
+
+```
+transaction  Start { isolation: None, read_only: false, mode: Default }
+query_sql    SELECT ... FROM "authors" WHERE "id" = ?1 LIMIT 1
+query_sql    SELECT ... FROM "books" WHERE EXISTS (...)
+transaction  Commit
+```
+
+Two SELECTs, no writes — the transaction is there to give both a consistent
+snapshot. Treating the boundaries as no-ops and letting the reads run was
+measured: the preload **succeeds and returns the correct rows**.
+
+So this half needs something else: a way for the engine to run a read-only
+plan without a transaction when the driver cannot provide one. That trade is
+not free — without the wrapper the two SELECTs can straddle a concurrent write
+— which is why it belongs in the engine, behind a capability, rather than in a
+driver quietly ignoring `Start`.
+
+No design document exists for this half.
 
 ## 6. Integers are limited to ±2^53
 
