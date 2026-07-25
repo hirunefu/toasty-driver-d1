@@ -20,7 +20,10 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toasty-core = "0.9.0"
-toasty-sql = "0.9.0"
+# `jiff`, `rust_decimal`, and `bigdecimal` gate the document-JSON encoders for
+# temporal and decimal values. Without them those types cannot be stored inside
+# a `#[document]` column at all, so the driver enables all three.
+toasty-sql = { version = "0.9.0", features = ["jiff", "rust_decimal", "bigdecimal"] }
 uuid = "1.24.0"
 
 [dev-dependencies]

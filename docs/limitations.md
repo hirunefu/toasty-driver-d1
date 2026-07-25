@@ -188,21 +188,28 @@ a mid-range value such as `2^60` is rejected.
 
 ## 7. Reading the integration suite results
 
-Against Toasty 0.9's suite (1348 generated tests): **717 pass, 631 fail**.
+Against Toasty 0.9's suite (1348 generated tests): **720 pass, 628 fail**.
+
+Every failure reduces to one of two causes:
 
 | Cause | Tests | Fixable |
 | --- | --- | --- |
-| Requires a transaction | 624 | No — D1 rejects `BEGIN`/`COMMIT` |
-| Integer beyond ±2^53 | 4 | No — rejected at bind time rather than corrupted |
-| `Timestamp` inside a `#[document]` value | 3 | Unknown — not yet investigated |
+| Requires a transaction | 625 | Not here — see sections 1 and 5 |
+| Integer beyond ±2^53 | 3 | No — rejected at bind time rather than corrupted |
 
 **That failure count overstates the gap.** Most suite tests seed their
 fixtures with a multi-record `create!`, so they fail before reaching the
 feature under test. All six `filter_like` tests fail on D1, yet `LIKE` itself
 works fine.
 
-This is why the capability table in the README comes from
-[`tests/capabilities.rs`](../tests/capabilities.rs), which seeds one record per
-statement and probes one feature per test, rather than from these totals. The
-suite number measures how much of Toasty's surface assumes transactions — not
-how much of it D1 can do.
+That is why the README's capability table names its evidence per row, and why
+[`tests/capabilities.rs`](../tests/capabilities.rs) exists at all: it seeds one
+record per statement and probes one feature per test, so a result there means
+what it says. The suite total measures how much of Toasty's surface assumes
+transactions — not how much of it D1 can do.
+
+A third cause used to appear here — three failures encoding a `Timestamp`
+inside a `#[document]` value. That one was the driver's own fault: `toasty-sql`
+gates its temporal and decimal document encoders behind the `jiff`,
+`rust_decimal`, and `bigdecimal` features, and this crate did not enable them.
+It now does, and those tests pass.

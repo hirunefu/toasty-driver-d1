@@ -14,10 +14,11 @@ the driver runs anywhere `reqwest` runs — no Workers runtime, no D1 binding.
 
 ## What this driver cannot do
 
-Five things fail, every time, by design. Each was measured against a live
-database — none is a "not yet implemented". For why, what D1 can do instead,
-how other ORMs handle the same wall, and the designs that were tried and
-rejected, see **[docs/limitations.md](docs/limitations.md)**.
+Four things fail, every time. Each was measured against a live database. Two
+are properties of D1 itself and will not change; two are gaps in Toasty that
+an upstream change could close. For the evidence, what D1 can do instead, how
+other ORMs handle the same wall, and the designs that were tried and rejected,
+see **[docs/limitations.md](docs/limitations.md)**.
 
 **1. Explicit transactions.** D1 rejects `BEGIN`, `COMMIT`, and `SAVEPOINT`
 as SQL, so `db.transaction()` cannot be honoured.
@@ -59,14 +60,6 @@ Item::create().big(i64::MAX).exec(&mut db).await
 //        carries without loss of precision
 ```
 
-**5. `Timestamp` inside a `#[document]` value.** Serializing an embedded
-document that contains a timestamp fails. Timestamps in ordinary columns are
-fine.
-
-```
-Error: serialize document value: cannot encode Timestamp(..) as JSON
-```
-
 Two more properties are worth knowing before adopting the driver, though
 neither is an outright failure:
 
@@ -99,23 +92,24 @@ The API token needs the account-level **D1 Edit** permission.
 
 ## What works
 
-Verified against a live database by `tests/capabilities.rs`, one feature per
-test:
+All verified against a live database. The **probe** column says where: `cap`
+is [`tests/capabilities.rs`](tests/capabilities.rs), which exercises one
+feature per test; `suite` is Toasty's own driver integration suite.
 
-| Feature | Status |
-| --- | --- |
-| Create / update / delete, one record per statement | ✅ |
-| Queries by key, by field, `LIKE`, `starts_with`, `IN` | ✅ |
-| `order_by` + `limit`, `count()` | ✅ |
-| Relations queried per side (`author.books()`, FK lookup) | ✅ |
-| Embedded structs and enums, documents, collections | ✅ |
-| `Vec<u8>` and UUID keys | ✅ |
-| Upsert, auto-increment keys, composite keys, indices | ✅ |
-| Multi-record `create!` | ❌ needs a transaction |
-| Relation preload (`.include()`) | ❌ needs a transaction |
-| Explicit transactions | ❌ |
-| Integers beyond ±2^53 | ❌ rejected at bind time |
-| `Timestamp` inside a `#[document]` value | ❌ |
+| Feature | Status | Probe |
+| --- | --- | --- |
+| Create / update / delete, one record per statement | ✅ | cap |
+| Queries by key, by field, `LIKE`, `starts_with`, `IN` | ✅ | cap |
+| `order_by` + `limit`, `count()` | ✅ | cap |
+| Relations queried per side (`author.books()`, FK lookup) | ✅ | cap |
+| Embedded structs and enums | ✅ | suite |
+| Documents and collections, including temporal values | ✅ | suite |
+| `Vec<u8>` and UUID keys | ✅ | suite |
+| Upsert, auto-increment keys, composite keys, indices | ✅ | suite |
+| Multi-record `create!` | ❌ | cap |
+| Relation preload (`.include()`) | ❌ | cap |
+| Explicit transactions | ❌ | suite |
+| Integers beyond ±2^53 | ❌ | suite |
 
 The short version: **anything that is one statement works; anything Toasty
 implements as several statements that must agree does not.**
@@ -141,7 +135,7 @@ cargo test --features live-tests --test integration_suite
 The suite creates and drops tables freely, hence the separate variable — do
 not point it at a database you care about.
 
-The suite reports **717 pass, 631 fail**. That count overstates the gap: most
+The suite reports **720 pass, 628 fail**. That count overstates the gap: most
 of its tests seed fixtures with a multi-record `create!` and so fail before
 reaching the feature under test — all six `filter_like` tests fail on D1, yet
 `LIKE` itself works. See
