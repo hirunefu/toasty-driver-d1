@@ -1,0 +1,31 @@
+[package]
+name = "toasty-driver-d1"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Toasty driver for Cloudflare D1, over D1's HTTP API"
+repository = "https://github.com/hirunefu/toasty-driver-d1"
+readme = "README.md"
+keywords = ["toasty", "d1", "cloudflare", "sqlite", "orm"]
+categories = ["database"]
+
+[features]
+# Opt-in: runs toasty's driver integration suite against a real D1 database.
+# Off by default so `cargo test` stays runnable without credentials.
+live-tests = []
+
+[dependencies]
+async-trait = "0.1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toasty-core = "0.9.0"
+toasty-sql = "0.9.0"
+uuid = "1.24.0"
+
+[dev-dependencies]
+hashbrown = "0.17.1"
+toasty = "0.9.0"
+toasty-driver-integration-suite = "0.9.0"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+wiremock = "0.6"
