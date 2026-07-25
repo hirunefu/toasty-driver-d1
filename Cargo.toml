@@ -32,3 +32,10 @@ toasty = "0.9.0"
 toasty-driver-integration-suite = "0.9.0"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 wiremock = "0.6"
+
+# EXPERIMENT: points at the local toasty fork that adds Capability::snapshot_reads.
+[patch.crates-io]
+toasty = { path = "../toasty/crates/toasty" }
+toasty-core = { path = "../toasty/crates/toasty-core" }
+toasty-sql = { path = "../toasty/crates/toasty-sql" }
+toasty-driver-integration-suite = { path = "../toasty/crates/toasty-driver-integration-suite" }

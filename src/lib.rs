@@ -133,7 +133,15 @@ impl Driver for D1 {
     }
 
     fn capability(&self) -> &'static Capability {
-        &Capability::SQLITE
+        // D1 is SQLite in every respect the planner cares about, except that
+        // the HTTP API cannot open a transaction — so a read-only plan has to
+        // be allowed to run without the snapshot one would otherwise give it.
+        static CAPABILITY: std::sync::OnceLock<Capability> = std::sync::OnceLock::new();
+        CAPABILITY.get_or_init(|| Capability {
+            driver_name: "D1",
+            snapshot_reads: false,
+            ..Capability::SQLITE
+        })
     }
 
     async fn connect(&self, _cx: &ConnectContext) -> Result<Box<dyn toasty_core::Connection>> {

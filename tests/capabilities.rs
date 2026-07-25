@@ -173,15 +173,12 @@ async fn relation_preload_is_rejected() {
     let author_id = seed(&db).await;
     let mut handle = db.clone();
 
-    let err = Author::filter_by_id(author_id)
+    let author = Author::filter_by_id(author_id)
         .include(Author::fields().books())
         .get(&mut handle)
         .await
-        .expect_err("preload should fail on D1");
-    assert!(
-        err.to_string().contains("transaction"),
-        "unexpected error: {err}"
-    );
+        .expect("preload should work once read-only plans skip the transaction");
+    assert_eq!(author.books.get().len(), 3);
 }
 
 #[tokio::test]

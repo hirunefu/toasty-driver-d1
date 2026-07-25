@@ -3947,8 +3947,6 @@ dependencies = [
 [[package]]
 name = "toasty"
 version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b2abf272caf351f58e03758745b6185576fcfe7a513b007683c2f8eec698eed2"
 dependencies = [
  "async-trait",
  "bigdecimal",
@@ -3979,8 +3977,6 @@ dependencies = [
 [[package]]
 name = "toasty-core"
 version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fc1650657e3784097859a1c31cf91b48e337f85684757e0c6ad44e887f0e009f"
 dependencies = [
  "assert-struct",
  "async-trait",
@@ -4017,8 +4013,6 @@ dependencies = [
 [[package]]
 name = "toasty-driver-integration-suite"
 version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "202d5cba447c5acdb4a5d52c423ac381fbdeb8271fefa3fc432d67d5b245d5b8"
 dependencies = [
  "assert-struct",
  "async-trait",
@@ -4040,8 +4034,6 @@ dependencies = [
 [[package]]
 name = "toasty-driver-integration-suite-macros"
 version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d4ae591409f5ec48ba82632abed68016a811e0ec81c0d870572b446d43dc8e88"
 dependencies = [
  "hashbrown 0.17.1",
  "proc-macro2",
@@ -4052,8 +4044,6 @@ dependencies = [
 [[package]]
 name = "toasty-driver-mysql"
 version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0347a79ded078fd43a53a07cd6ee41312a8f0b44a404ea370667a2aa7023791d"
 dependencies = [
  "async-trait",
  "bigdecimal",
@@ -4071,8 +4061,6 @@ dependencies = [
 [[package]]
 name = "toasty-driver-postgresql"
 version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7bc49e29cd2521b4835aa342adb99fe362a0b38083dda31112218c2762dfe09b"
 dependencies = [
  "async-trait",
  "bigdecimal",
@@ -4101,8 +4089,6 @@ dependencies = [
 [[package]]
 name = "toasty-driver-sqlite"
 version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ce0b90d030bd83e135b96259d630482efe6b1fa937670c75d825ae2992d6ea91"
 dependencies = [
  "async-trait",
  "percent-encoding",
@@ -4118,8 +4104,6 @@ dependencies = [
 [[package]]
 name = "toasty-driver-turso"
 version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "22cc0682b65eeab9b7d6e0bac3f309591df5b9b6df32f868a3a6ee5ca3636e24"
 dependencies = [
  "async-trait",
  "percent-encoding",
@@ -4136,8 +4120,6 @@ dependencies = [
 [[package]]
 name = "toasty-macros"
 version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "16966e54a422be54959b0ad12bdbdcffc101c77aeca7d49fefff33142c709a29"
 dependencies = [
  "hashbrown 0.17.1",
  "heck",
@@ -4151,8 +4133,6 @@ dependencies = [
 [[package]]
 name = "toasty-sql"
 version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b19948205b682d1750a8cf331b0b7fa666baffe2a3a2c0a05d5e94103c0fcc08"
 dependencies = [
  "bigdecimal",
  "jiff",
