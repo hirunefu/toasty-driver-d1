@@ -78,6 +78,31 @@ values are corrupted in transit: `i64::MAX` comes back as
 `real`. Rather than let that pass silently, binding rejects out-of-range
 integers with an error naming the limit. Auto-increment ids stay far below it.
 
+### Why not emulate transactions?
+
+D1's HTTP API *can* run several statements atomically — send them in one
+request and a failure anywhere rolls the whole request back. That is the same
+primitive behind `db.batch()` in the Workers binding, and it is how Drizzle
+ORM supports multi-statement writes on D1. (Drizzle's `transaction()` emits
+literal `begin`/`commit`, which D1 rejects; it has been an open bug there.)
+
+Two designs were tried against that primitive and rejected:
+
+- **Buffer statements until commit, returning lazy result streams.** Toasty's
+  engine awaits each statement's rows before issuing the next, so deferring
+  results deadlocks. Measured, not assumed.
+- **Treat transaction boundaries as no-ops and write eagerly.** This makes
+  batches "work" while silently dropping atomicity — a mid-batch failure
+  leaves partial data with no error. Not worth the correctness.
+
+The clean fix belongs upstream. Toasty has a design for it —
+`Capability::transaction_delivery` with a `WriteSet` mode, where a driver
+receives an atomic group as one operation instead of a statement stream
+([docs/dev/design/atomic-batches.md](https://github.com/tokio-rs/toasty/blob/main/docs/dev/design/atomic-batches.md),
+motivated by DynamoDB). D1's HTTP API fits `WriteSet` exactly. The design is
+not implemented in Toasty 0.9, so until it lands this driver rejects
+transactions, matching what Toasty's own DynamoDB driver does.
+
 **No interactive migrations.** `apply_migration` runs each statement in its
 own request, so a migration that fails midway leaves earlier statements
 applied. Rerunning after a fix is the recovery path.
