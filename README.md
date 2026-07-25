@@ -33,6 +33,29 @@ let db = toasty::Db::builder()
 
 The API token needs the account-level **D1 Edit** permission.
 
+## What works
+
+Verified against a live database by `tests/capabilities.rs`, one feature per
+test:
+
+| Feature | Status |
+| --- | --- |
+| Create / update / delete, one record per statement | ✅ |
+| Queries by key, by field, `LIKE`, `starts_with`, `IN` | ✅ |
+| `order_by` + `limit`, `count()` | ✅ |
+| Relations queried per side (`author.books()`, FK lookup) | ✅ |
+| Embedded structs and enums, documents, collections | ✅ |
+| `Vec<u8>` and UUID keys (stored as real BLOBs) | ✅ |
+| Upsert, auto-increment keys, composite keys, indices | ✅ |
+| Multi-record `create!` | ❌ needs a transaction |
+| Relation preload (`.include()`) | ❌ needs a transaction |
+| Explicit transactions | ❌ |
+| Integers beyond ±2^53 | ❌ rejected at bind time |
+| `Timestamp` inside a `#[document]` value | ❌ |
+
+The short version: **anything that is one statement works; anything Toasty
+implements as several statements that must agree does not.**
+
 ## Limitations
 
 These are properties of D1's HTTP API, not gaps that a future release closes.
@@ -89,7 +112,7 @@ not point it at a database you care about.
 ### Suite results
 
 Against Toasty 0.9's suite (1348 generated tests): **717 pass, 631 fail**.
-Every failure traces to one of three causes above:
+Every failure traces to one of three causes:
 
 | Cause | Tests | Fixable |
 | --- | --- | --- |
@@ -97,9 +120,13 @@ Every failure traces to one of three causes above:
 | Integer beyond ±2^53 | 4 | No — rejected at bind time rather than corrupted |
 | Timestamp inside a `#[document]` value | 3 | Unknown — not yet investigated |
 
-The transaction figure is large because Toasty builds batch writes and
-multi-table relation writes on transactions, so a single missing primitive
-takes a wide slice of the suite with it.
+**Read that failure count carefully.** Most suite tests seed their fixtures
+with a multi-record `create!`, so they fail before reaching the feature under
+test: all six `filter_like` tests fail on D1, yet `LIKE` itself works. That is
+why the capability table above comes from `tests/capabilities.rs`, which seeds
+one record per statement, rather than from these totals. The suite number
+measures how much of Toasty's surface assumes transactions — not how much of
+it D1 can do.
 
 ## License
 
