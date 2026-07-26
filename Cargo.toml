@@ -3,20 +3,32 @@ name = "toasty-driver-d1"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
-description = "Toasty driver for Cloudflare D1, over D1's HTTP API"
+description = "Toasty driver for Cloudflare D1, over its HTTP API or its Workers binding"
 repository = "https://github.com/hirunefu/toasty-driver-d1"
 readme = "README.md"
 keywords = ["toasty", "d1", "cloudflare", "sqlite", "orm"]
 categories = ["database"]
 
 [features]
+default = ["rest"]
+# D1's HTTP API, reachable from anywhere with an API token.
+rest = ["dep:reqwest"]
+# D1's Workers binding. Only builds for wasm32, and only inside a Worker: the
+# binding is a JavaScript object handed to the isolate, not something a
+# process can open. It is the faster of the two — the HTTP API is a round trip
+# out to Cloudflare's REST endpoint, while the binding is a call within the
+# same datacenter.
+binding = ["dep:worker", "dep:js-sys", "dep:wasm-bindgen"]
 # Opt-in: runs toasty's driver integration suite against a real D1 database.
 # Off by default so `cargo test` stays runnable without credentials.
 live-tests = []
 
 [dependencies]
 async-trait = "0.1"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls",
+], optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toasty-core = "0.9.0"
@@ -25,6 +37,14 @@ toasty-core = "0.9.0"
 # a `#[document]` column at all, so the driver enables all three.
 toasty-sql = { version = "0.9.0", features = ["jiff", "rust_decimal", "bigdecimal"] }
 uuid = "1.24.0"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys = { version = "0.3", optional = true }
+# wasm32 has no OS randomness, so uuid needs pointing at the JavaScript
+# crypto API. Nothing else about the driver changes.
+uuid = { version = "1.24.0", features = ["js"] }
+wasm-bindgen = { version = "0.2", optional = true }
+worker = { version = "0.8", features = ["d1"], optional = true }
 
 [dev-dependencies]
 hashbrown = "0.17.1"

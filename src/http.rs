@@ -5,7 +5,8 @@
 
 use serde::Deserialize;
 
-use crate::error::D1Error;
+use crate::error::{D1Error, TransportError};
+use crate::outcome::RawOutcome;
 
 pub(crate) const DEFAULT_BASE_URL: &str = "https://api.cloudflare.com/client/v4";
 
@@ -14,13 +15,6 @@ pub(crate) struct D1Client {
     http: reqwest::Client,
     endpoint: String,
     token: String,
-}
-
-/// One statement's outcome from `/raw`.
-#[derive(Debug, Default)]
-pub(crate) struct RawOutcome {
-    pub(crate) rows: Vec<Vec<serde_json::Value>>,
-    pub(crate) changes: u64,
 }
 
 #[derive(Deserialize)]
@@ -58,11 +52,9 @@ struct Meta {
     changes: u64,
 }
 
-/// Errors split by transport vs. backend so the caller can classify
-/// connection loss for the pool (see toasty's driver error contract).
-pub(crate) enum HttpError {
-    Transport(reqwest::Error),
-    Api(D1Error),
+/// Wraps a reqwest failure as a lost connection.
+fn transport(err: reqwest::Error) -> TransportError {
+    TransportError::Lost(D1Error::new(err.to_string()))
 }
 
 impl D1Client {
@@ -83,7 +75,7 @@ impl D1Client {
         &self,
         sql: &str,
         params: Vec<serde_json::Value>,
-    ) -> Result<RawOutcome, HttpError> {
+    ) -> Result<RawOutcome, TransportError> {
         let response = self
             .http
             .post(&self.endpoint)
@@ -91,10 +83,10 @@ impl D1Client {
             .json(&serde_json::json!({ "sql": sql, "params": params }))
             .send()
             .await
-            .map_err(HttpError::Transport)?;
+            .map_err(transport)?;
 
         let status = response.status();
-        let envelope: Envelope = response.json().await.map_err(HttpError::Transport)?;
+        let envelope: Envelope = response.json().await.map_err(transport)?;
 
         if !envelope.success {
             let detail = envelope
@@ -103,17 +95,16 @@ impl D1Client {
                 .map(|e| format!("{}: {}", e.code, e.message))
                 .collect::<Vec<_>>()
                 .join("; ");
-            return Err(HttpError::Api(D1Error::new(format!(
+            return Err(TransportError::Api(D1Error::new(format!(
                 "D1 query failed (HTTP {status}): {detail}"
             ))));
         }
 
         // One statement in, one result out.
-        let statement = envelope
-            .result
-            .into_iter()
-            .next()
-            .ok_or_else(|| HttpError::Api(D1Error::new("D1 returned no statement result")))?;
+        let statement =
+            envelope.result.into_iter().next().ok_or_else(|| {
+                TransportError::Api(D1Error::new("D1 returned no statement result"))
+            })?;
 
         Ok(RawOutcome {
             rows: statement.results.map(|r| r.rows).unwrap_or_default(),
@@ -128,7 +119,7 @@ impl D1Client {
     ///
     /// The statements arrive already inlined, because `?N` placeholders are
     /// numbered per statement while a request carries one `params` array.
-    pub(crate) async fn raw_batch(&self, sql: &str) -> Result<Vec<RawOutcome>, HttpError> {
+    pub(crate) async fn raw_batch(&self, sql: &str) -> Result<Vec<RawOutcome>, TransportError> {
         let response = self
             .http
             .post(&self.endpoint)
@@ -136,10 +127,10 @@ impl D1Client {
             .json(&serde_json::json!({ "sql": sql, "params": [] }))
             .send()
             .await
-            .map_err(HttpError::Transport)?;
+            .map_err(transport)?;
 
         let status = response.status();
-        let envelope: Envelope = response.json().await.map_err(HttpError::Transport)?;
+        let envelope: Envelope = response.json().await.map_err(transport)?;
 
         if !envelope.success {
             let detail = envelope
@@ -148,7 +139,7 @@ impl D1Client {
                 .map(|e| format!("{}: {}", e.code, e.message))
                 .collect::<Vec<_>>()
                 .join("; ");
-            return Err(HttpError::Api(D1Error::new(format!(
+            return Err(TransportError::Api(D1Error::new(format!(
                 "D1 write batch failed (HTTP {status}): {detail}"
             ))));
         }
@@ -257,12 +248,12 @@ mod tests {
         };
 
         match err {
-            HttpError::Api(e) => {
+            TransportError::Api(e) => {
                 let msg = e.to_string();
                 assert!(msg.contains("7500"), "message was: {msg}");
                 assert!(msg.contains("no such table"), "message was: {msg}");
             }
-            HttpError::Transport(_) => panic!("expected an API error, got transport"),
+            TransportError::Lost(_) => panic!("expected an API error, got a lost connection"),
         }
     }
 }

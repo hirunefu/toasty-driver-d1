@@ -1,32 +1,50 @@
-//! Toasty driver for [Cloudflare D1](https://developers.cloudflare.com/d1/)
-//! over its HTTP query API.
+//! Toasty driver for [Cloudflare D1](https://developers.cloudflare.com/d1/).
 //!
 //! D1 is SQLite, so SQL generation reuses toasty's SQLite serializer and
-//! `Capability::SQLITE`; only the execution transport differs — every
-//! operation is an HTTPS round trip to `/d1/database/{id}/raw`.
+//! `Capability::SQLITE`; only the execution transport differs.
+//!
+//! # Transports
+//!
+//! - `rest` (default): D1's HTTP query API. Works from anywhere with an API
+//!   token, and every operation is an HTTPS round trip to
+//!   `/d1/database/{id}/raw`.
+//! - `binding`: D1's Workers binding, via [`D1::from_binding`]. Only builds
+//!   for `wasm32` and only runs inside a Worker, because the binding is a
+//!   JavaScript object handed to the isolate rather than something a process
+//!   can open. It is the faster of the two — a call inside the datacenter
+//!   instead of a round trip out to the REST endpoint.
 //!
 //! # Caveats
 //!
-//! - Every query pays a network round trip; latency is HTTP-API latency, not
-//!   local-SQLite latency.
-//! - The HTTP API has no interactive transactions: `Operation::Transaction`
+//! - Neither transport has interactive transactions: `Operation::Transaction`
 //!   is rejected, and migrations apply statement-by-statement without a
-//!   wrapping transaction.
+//!   wrapping transaction. Writes that must commit together are submitted as
+//!   one batch instead (`Capability::atomic_write_batch`).
 //! - Integers beyond 2^53 lose precision in JSON transit (see `value`).
 //! - `Bytes` columns are unsupported.
 //!
 //! # Examples
 //!
 //! ```ignore
+//! // Anywhere, with an API token:
 //! let driver = toasty_driver_d1::D1::from_env()?;
+//!
+//! // Inside a Worker, from the binding:
+//! let driver = toasty_driver_d1::D1::from_binding(env.d1("DB")?);
+//!
 //! let db = toasty::Db::builder()
 //!     .models(toasty::models!(crate::*))
 //!     .build(driver)
 //!     .await?;
 //! ```
 
+#[cfg(feature = "binding")]
+mod binding;
 mod error;
+#[cfg(feature = "rest")]
 mod http;
+mod outcome;
+mod transport;
 mod value;
 
 use std::{borrow::Cow, sync::Arc};
@@ -46,8 +64,9 @@ use toasty_core::{
 };
 use toasty_sql as sql;
 
-use crate::error::D1Error;
-use crate::http::{D1Client, HttpError};
+use crate::error::{D1Error, TransportError};
+use crate::outcome::Want;
+use crate::transport::Transport;
 
 enum SqlReturn {
     Count,
@@ -55,29 +74,57 @@ enum SqlReturn {
     Types(Vec<stmt::Type>),
 }
 
+/// How this driver reaches the database.
+enum Source {
+    #[cfg(feature = "rest")]
+    Rest {
+        account_id: String,
+        database_id: String,
+        api_token: String,
+        base_url: String,
+    },
+    /// A binding is already a live handle, so there is nothing to build per
+    /// connection — unlike the HTTP transport, which is assembled from
+    /// credentials each time.
+    #[cfg(feature = "binding")]
+    Binding(crate::binding::D1Binding),
+}
+
 /// A [`Driver`] that executes toasty operations against a Cloudflare D1
-/// database through the HTTP API.
+/// database, over either D1's HTTP API or its Workers binding.
 pub struct D1 {
-    account_id: String,
-    database_id: String,
-    api_token: String,
-    base_url: String,
+    source: Source,
 }
 
 impl D1 {
-    /// Creates a driver for the given database.
+    /// Creates a driver for the given database, reached over the HTTP API.
     ///
     /// The token needs the `D1 Edit` permission for the account.
+    #[cfg(feature = "rest")]
     pub fn new(
         account_id: impl Into<String>,
         database_id: impl Into<String>,
         api_token: impl Into<String>,
     ) -> Self {
         Self {
-            account_id: account_id.into(),
-            database_id: database_id.into(),
-            api_token: api_token.into(),
-            base_url: http::DEFAULT_BASE_URL.to_string(),
+            source: Source::Rest {
+                account_id: account_id.into(),
+                database_id: database_id.into(),
+                api_token: api_token.into(),
+                base_url: http::DEFAULT_BASE_URL.to_string(),
+            },
+        }
+    }
+
+    /// Creates a driver from a D1 binding.
+    ///
+    /// This is the transport to prefer inside a Worker: the binding is a call
+    /// within the datacenter, while the HTTP API is a round trip out to
+    /// Cloudflare's REST endpoint and back.
+    #[cfg(feature = "binding")]
+    pub fn from_binding(database: worker::D1Database) -> Self {
+        Self {
+            source: Source::Binding(crate::binding::D1Binding::new(database)),
         }
     }
 
@@ -87,6 +134,7 @@ impl D1 {
     /// Deliberately not the `CLOUDFLARE_*` names: wrangler treats
     /// `CLOUDFLARE_API_TOKEN` as its own credential (including auto-loading
     /// it from `.env`), which hijacks OAuth logins in any repo that sets it.
+    #[cfg(feature = "rest")]
     pub fn from_env() -> Result<Self> {
         let get = |key: &str| {
             std::env::var(key).map_err(|_| {
@@ -101,35 +149,77 @@ impl D1 {
     }
 
     /// Overrides the API origin. Intended for tests against a mock server.
-    pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
-        self.base_url = base_url.into();
+    #[cfg(feature = "rest")]
+    pub fn with_base_url(mut self, url: impl Into<String>) -> Self {
+        // A match rather than `if let`: with only `rest` compiled in there is
+        // a single variant and `if let` is irrefutable, but the second arm is
+        // needed as soon as `binding` joins it.
+        match &mut self.source {
+            Source::Rest { base_url, .. } => *base_url = url.into(),
+            #[cfg(feature = "binding")]
+            Source::Binding(_) => {}
+        }
         self
     }
 
-    fn client(&self) -> D1Client {
-        D1Client::new(
-            &self.base_url,
-            &self.account_id,
-            &self.database_id,
-            &self.api_token,
-        )
+    fn client(&self) -> Transport {
+        match &self.source {
+            #[cfg(feature = "rest")]
+            Source::Rest {
+                account_id,
+                database_id,
+                api_token,
+                base_url,
+            } => Transport::Rest(crate::http::D1Client::new(
+                base_url,
+                account_id,
+                database_id,
+                api_token,
+            )),
+            #[cfg(feature = "binding")]
+            Source::Binding(binding) => Transport::Binding(binding.clone()),
+        }
     }
 }
 
 impl std::fmt::Debug for D1 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // The API token must never reach logs.
-        f.debug_struct("D1")
-            .field("account_id", &self.account_id)
-            .field("database_id", &self.database_id)
-            .finish_non_exhaustive()
+        let mut out = f.debug_struct("D1");
+        match &self.source {
+            #[cfg(feature = "rest")]
+            Source::Rest {
+                account_id,
+                database_id,
+                ..
+            } => {
+                out.field("account_id", account_id)
+                    .field("database_id", database_id);
+            }
+            #[cfg(feature = "binding")]
+            Source::Binding(_) => {
+                out.field("source", &"binding");
+            }
+        }
+        out.finish_non_exhaustive()
     }
 }
 
 #[async_trait]
 impl Driver for D1 {
     fn url(&self) -> Cow<'_, str> {
-        Cow::Owned(format!("d1://{}/{}", self.account_id, self.database_id))
+        match &self.source {
+            #[cfg(feature = "rest")]
+            Source::Rest {
+                account_id,
+                database_id,
+                ..
+            } => Cow::Owned(format!("d1://{account_id}/{database_id}")),
+            // A binding names no account or database: the isolate is handed a
+            // handle, not an address.
+            #[cfg(feature = "binding")]
+            Source::Binding(_) => Cow::Borrowed("d1://binding"),
+        }
     }
 
     fn capability(&self) -> &'static Capability {
@@ -175,6 +265,7 @@ impl Driver for D1 {
                 "SELECT name FROM sqlite_master WHERE type = 'table' \
                  AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%'",
                 vec![],
+                Want::Rows,
             )
             .await
             .map_err(into_core_error)?;
@@ -182,7 +273,11 @@ impl Driver for D1 {
         for row in tables.rows {
             if let Some(serde_json::Value::String(name)) = row.first() {
                 client
-                    .raw(&format!("DROP TABLE IF EXISTS \"{name}\""), vec![])
+                    .raw(
+                        &format!("DROP TABLE IF EXISTS \"{name}\""),
+                        vec![],
+                        Want::Changes,
+                    )
                     .await
                     .map_err(into_core_error)?;
             }
@@ -195,11 +290,11 @@ impl Driver for D1 {
 /// A "connection" to D1. Stateless: each exec is an independent HTTPS call.
 #[derive(Debug)]
 pub struct Connection {
-    client: D1Client,
+    client: Transport,
 }
 
 /// Turns one statement's rows into the response shape the plan expects.
-fn rows_to_response(outcome: crate::http::RawOutcome, ret: SqlReturn) -> Result<ExecResponse> {
+fn rows_to_response(outcome: crate::outcome::RawOutcome, ret: SqlReturn) -> Result<ExecResponse> {
     match ret {
         SqlReturn::Count => Ok(ExecResponse::count(outcome.changes)),
         SqlReturn::Infer => {
@@ -284,12 +379,12 @@ fn sql_literal(value: &serde_json::Value) -> String {
     }
 }
 
-fn into_core_error(err: HttpError) -> toasty_core::Error {
+fn into_core_error(err: TransportError) -> toasty_core::Error {
     match err {
         // A transport-level failure must classify as connection_lost so the
         // pool evicts the slot (see toasty's driver error contract).
-        HttpError::Transport(e) => toasty_core::Error::connection_lost(e),
-        HttpError::Api(e) => toasty_core::Error::driver_operation_failed(e),
+        TransportError::Lost(e) => toasty_core::Error::connection_lost(e),
+        TransportError::Api(e) => toasty_core::Error::driver_operation_failed(e),
     }
 }
 
@@ -306,9 +401,16 @@ impl Connection {
             .collect::<Result<Vec<_>, _>>()
             .map_err(toasty_core::Error::driver_operation_failed)?;
 
+        // Which half of the outcome the plan will read, decided before the
+        // statement runs because the binding transport cannot produce both.
+        let want = match ret {
+            SqlReturn::Count => Want::Changes,
+            SqlReturn::Infer | SqlReturn::Types(_) => Want::Rows,
+        };
+
         let outcome = self
             .client
-            .raw(sql_str, params)
+            .raw(sql_str, params, want)
             .await
             .map_err(into_core_error)?;
 
@@ -453,7 +555,7 @@ impl toasty_core::driver::Connection for Connection {
             let stmt =
                 serializer.serialize(&sql::Statement::create_table(table, &Capability::SQLITE));
             self.client
-                .raw(&stmt, vec![])
+                .raw(&stmt, vec![], Want::Changes)
                 .await
                 .map_err(into_core_error)?;
 
@@ -463,7 +565,7 @@ impl toasty_core::driver::Connection for Connection {
                 }
                 let stmt = serializer.serialize(&sql::Statement::create_index(index));
                 self.client
-                    .raw(&stmt, vec![])
+                    .raw(&stmt, vec![], Want::Changes)
                     .await
                     .map_err(into_core_error)?;
             }
@@ -481,6 +583,7 @@ impl toasty_core::driver::Connection for Connection {
                     applied_at TEXT NOT NULL
                 )",
                 vec![],
+                Want::Changes,
             )
             .await
             .map_err(into_core_error)?;
@@ -490,6 +593,7 @@ impl toasty_core::driver::Connection for Connection {
             .raw(
                 "SELECT id FROM __toasty_migrations ORDER BY applied_at",
                 vec![],
+                Want::Rows,
             )
             .await
             .map_err(into_core_error)?;
@@ -516,7 +620,7 @@ impl toasty_core::driver::Connection for Connection {
         // applied; rerunning after a fix is the recovery path.
         for statement in migration.statements() {
             self.client
-                .raw(statement, vec![])
+                .raw(statement, vec![], Want::Changes)
                 .await
                 .map_err(into_core_error)?;
         }
@@ -526,6 +630,7 @@ impl toasty_core::driver::Connection for Connection {
                 "INSERT INTO __toasty_migrations (id, name, applied_at) \
                  VALUES (?1, ?2, datetime('now'))",
                 vec![serde_json::json!(id as i64), serde_json::json!(name)],
+                Want::Changes,
             )
             .await
             .map_err(into_core_error)?;
