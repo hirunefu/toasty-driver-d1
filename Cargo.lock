@@ -4030,6 +4030,7 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
+ "wasm-bindgen-futures",
 ]
 
 [[package]]

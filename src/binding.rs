@@ -18,7 +18,7 @@ use wasm_bindgen::JsValue;
 use worker::send::{SendFuture, SendWrapper};
 
 use crate::error::{D1Error, TransportError};
-use crate::outcome::{RawOutcome, Want};
+use crate::outcome::{RawOutcome, Want, split_statements};
 
 pub(crate) struct D1Binding {
     /// `Rc` because `D1Database` is not `Clone` and toasty builds a fresh
@@ -123,17 +123,6 @@ impl D1Binding {
         })
         .await
     }
-}
-
-/// Splits a batch back into statements.
-///
-/// The caller assembled them by joining with `;`, and every statement in a
-/// batch is a write built by the SQL serializer — no string literal in one can
-/// contain a `;` that did not come from a parameter, and parameters are
-/// inlined as numbers or quoted with doubled quotes. Anything left after the
-/// final `;` is whitespace.
-fn split_statements(sql: &str) -> impl Iterator<Item = &str> {
-    sql.split(';').map(str::trim).filter(|s| !s.is_empty())
 }
 
 fn changes_of(result: &worker::D1Result) -> u64 {

@@ -22,3 +22,61 @@ pub(crate) enum Want {
     Rows,
     Changes,
 }
+
+/// Splits a batch back into the statements it was joined from.
+///
+/// Needed only by the binding transport: `D1Database::batch` takes prepared
+/// statements, while the HTTP API accepts the joined string as-is.
+///
+/// Splitting on `;` is safe for what the engine actually sends. Every
+/// statement in a batch is a write built by toasty's SQL serializer, and its
+/// parameters are already inlined -- as numbers, or quoted with `'` doubled.
+/// So a `;` inside a string literal is the one case that would break this, and
+/// it cannot occur without a parameter carrying one.
+///
+/// Caveat: that argument rests on the caller. A batch assembled by hand from
+/// arbitrary SQL is outside what this handles.
+// Only the binding transport calls this, but its tests are worth running on
+// any target -- they pin a contract about what the engine sends, not about
+// how it is delivered.
+#[cfg_attr(not(feature = "binding"), allow(dead_code))]
+pub(crate) fn split_statements(sql: &str) -> impl Iterator<Item = &str> {
+    sql.split(';').map(str::trim).filter(|s| !s.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::split_statements;
+
+    fn split(sql: &str) -> Vec<&str> {
+        split_statements(sql).collect()
+    }
+
+    #[test]
+    fn splits_joined_statements_and_trims_them() {
+        assert_eq!(
+            split("INSERT INTO t VALUES (1); INSERT INTO t VALUES (2);"),
+            ["INSERT INTO t VALUES (1)", "INSERT INTO t VALUES (2)"]
+        );
+    }
+
+    #[test]
+    fn drops_the_empty_tail_after_a_trailing_semicolon() {
+        // The serializer appends `;` to each statement, so a joined batch ends
+        // with one. D1 rejects an empty statement outright, which is how this
+        // was found in the first place.
+        assert_eq!(split("UPDATE t SET a = 1;"), ["UPDATE t SET a = 1"]);
+        assert_eq!(split("UPDATE t SET a = 1;;  ;"), ["UPDATE t SET a = 1"]);
+    }
+
+    #[test]
+    fn a_lone_statement_without_a_semicolon_survives() {
+        assert_eq!(split("DELETE FROM t"), ["DELETE FROM t"]);
+    }
+
+    #[test]
+    fn nothing_at_all_yields_nothing() {
+        assert!(split("").is_empty());
+        assert!(split("   ;  ; ").is_empty());
+    }
+}
